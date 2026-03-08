@@ -1,86 +1,44 @@
-// app/api/auth/approve/route.ts
-// Transaction approval — owner + user dual confirmation
+// app/api/solana/route.ts
+// Fetches Solana wallet balance via Alchemy
 
 import { NextResponse } from 'next/server'
-import { createPendingTx, getTx, updateTx, rejectTx, getAllPending } from '@/lib/approval-store'
+import { ALCHEMY_CONFIG, WALLETS } from '@/lib/alchemy-config'
 
-const OWNER_WALLET = process.env.NEXT_PUBLIC_MAIN_WALLET || '0xba24d47e'
+export async function GET() {
+  const apiKey = ALCHEMY_CONFIG.sol.apiKey
 
-// GET /api/auth/approve — List all pending transactions (owner only)
-export async function GET(request: Request) {
-  const { searchParams } = new URL(request.url)
-  const txId = searchParams.get('txId')
-
-  if (txId) {
-    const tx = getTx(txId)
-    if (!tx) return NextResponse.json({ error: 'Transaction not found' }, { status: 404 })
-    return NextResponse.json(tx)
+  if (!apiKey || apiKey === '') {
+    return NextResponse.json({ error: 'Alchemy Solana API key not configured' }, { status: 503 })
   }
 
-  return NextResponse.json({ pending: getAllPending() })
-}
-
-// POST /api/auth/approve — Create or approve a transaction
-export async function POST(request: Request) {
   try {
-    const body = await request.json()
-    const { action, txId, role, ...txData } = body
+    const res = await fetch(
+      `https://solana-mainnet.g.alchemy.com/v2/${apiKey}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'getBalance',
+          params: [WALLETS.sol],
+        }),
+      }
+    )
 
-    // ── CREATE new pending transaction ──
-    if (action === 'create') {
-      const tx = createPendingTx({
-        to: txData.to,
-        value: txData.value,
-        token: txData.token || 'ETH',
-        chain: txData.chain || 'Ethereum',
-        initiatedBy: txData.initiatedBy,
-      })
+    const data = await res.json()
+    const lamports = data.result?.value || 0
+    const solBalance = lamports / 1e9
 
-      // In production: send push notification to owner here
-      // await sendPushNotification(OWNER_WALLET, tx)
-
-      return NextResponse.json({
-        txId: tx.id,
-        status: tx.status,
-        message: 'Transaction pending approval. Both owner and user must confirm.',
-        expiresAt: tx.expiresAt,
-      })
-    }
-
-    // ── APPROVE transaction ──
-    if (action === 'approve') {
-      const tx = getTx(txId)
-      if (!tx) return NextResponse.json({ error: 'Transaction not found' }, { status: 404 })
-      if (tx.status === 'expired') return NextResponse.json({ error: 'Transaction expired' }, { status: 410 })
-      if (tx.status === 'rejected') return NextResponse.json({ error: 'Transaction already rejected' }, { status: 409 })
-
-      const updates: Record<string, boolean> = {}
-      if (role === 'owner') updates.ownerApproved = true
-      if (role === 'user') updates.userApproved = true
-
-      const updated = updateTx(txId, updates)
-      return NextResponse.json({
-        txId,
-        status: updated?.status,
-        ownerApproved: updated?.ownerApproved,
-        userApproved: updated?.userApproved,
-        totpVerified: updated?.totpVerified,
-        biometricVerified: updated?.biometricVerified,
-        readyToSign: updated?.status === 'both_approved' &&
-                     updated?.totpVerified &&
-                     updated?.biometricVerified,
-      })
-    }
-
-    // ── REJECT transaction ──
-    if (action === 'reject') {
-      rejectTx(txId)
-      return NextResponse.json({ txId, status: 'rejected' })
-    }
-
-    return NextResponse.json({ error: 'Invalid action' }, { status: 400 })
+    return NextResponse.json({
+      address: WALLETS.sol,
+      solBalance,
+      lamports,
+      updatedAt: new Date().toISOString(),
+    })
   } catch (error) {
-    console.error('Approval error:', error)
-    return NextResponse.json({ error: 'Approval failed' }, { status: 500 })
+    console.error('Solana balance error:', error)
+    return NextResponse.json({ error: 'Failed to fetch Solana balance' }, { status: 500 })
   }
 }
+
