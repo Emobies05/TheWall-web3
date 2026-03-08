@@ -1,69 +1,43 @@
-// app/api/auth/totp/route.ts
-// Google Authenticator TOTP — setup & verify
+// app/api/prices/route.ts
+// Fetches live token prices from Alchemy / CoinGecko fallback
 
 import { NextResponse } from 'next/server'
-import { authenticator } from 'otplib'
 
-// Secret stored in env (generate once, store securely)
-const TOTP_SECRET = process.env.TOTP_SECRET || authenticator.generateSecret()
-
-// Strict settings: 30s window, 1 step tolerance
-authenticator.options = {
-  step: 30,
-  window: 1,
-  digits: 6,
-  algorithm: 'sha1',
+const COINGECKO_IDS: Record<string, string> = {
+  ETH: 'ethereum',
+  BNB: 'binancecoin',
+  USDC: 'usd-coin',
+  USDT: 'tether',
+  SOL: 'solana',
+  BTC: 'bitcoin',
+  MATIC: 'matic-network',
 }
 
-// GET /api/auth/totp — Generate QR code setup URI
 export async function GET() {
   try {
-    const accountName = process.env.OWNER_EMAIL || 'dwin@thewall'
-    const issuer = 'TheWall · DWIN'
+    const ids = Object.values(COINGECKO_IDS).join(',')
+    const response = await fetch(
+      `https://api.coingecko.com/api/v3/simple/price?ids=${ids}&vs_currencies=usd&include_24hr_change=true`,
+      { next: { revalidate: 60 } } // cache 60 seconds
+    )
 
-    const otpAuthUrl = authenticator.keyuri(accountName, issuer, TOTP_SECRET)
+    if (!response.ok) throw new Error('CoinGecko fetch failed')
+    const data = await response.json()
 
-    return NextResponse.json({
-      secret: TOTP_SECRET,
-      otpAuthUrl,
-      // QR code URL (use this in frontend with a QR library)
-      qrUrl: `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(otpAuthUrl)}`,
-      instructions: 'Scan this QR code with Google Authenticator app',
-    })
+    const prices: Record<string, { price: number; change24h: number }> = {}
+    for (const [symbol, id] of Object.entries(COINGECKO_IDS)) {
+      prices[symbol] = {
+        price: data[id]?.usd ?? 0,
+        change24h: data[id]?.usd_24h_change ?? 0,
+      }
+    }
+
+    return NextResponse.json({ prices, updatedAt: new Date().toISOString() })
   } catch (error) {
-    return NextResponse.json({ error: 'TOTP setup failed' }, { status: 500 })
-  }
-}
-
-// POST /api/auth/totp — Verify a 6-digit token
-export async function POST(request: Request) {
-  try {
-    const { token, txId } = await request.json()
-
-    if (!token || token.length !== 6) {
-      return NextResponse.json({ error: 'Invalid token format' }, { status: 400 })
-    }
-
-    const isValid = authenticator.verify({
-      token: String(token),
-      secret: TOTP_SECRET,
-    })
-
-    if (!isValid) {
-      return NextResponse.json({
-        verified: false,
-        error: 'Invalid or expired code. Codes refresh every 30 seconds.',
-      }, { status: 401 })
-    }
-
-    // If txId provided, mark TOTP as verified for that transaction
-    if (txId) {
-      const { updateTx } = await import('@/lib/approval-store')
-      updateTx(txId, { totpVerified: true })
-    }
-
-    return NextResponse.json({ verified: true, txId })
-  } catch (error) {
-    return NextResponse.json({ error: 'Verification failed' }, { status: 500 })
+    console.error('Price fetch error:', error)
+    return NextResponse.json(
+      { error: 'Failed to fetch prices', prices: {} },
+      { status: 500 }
+    )
   }
 }
